@@ -1,0 +1,775 @@
+---
+title: "Comprehensive Data Analysis Report"
+subtitle: "From Raw Data to Decisions: Cleaning, Visualization and Predictive Modeling in R"
+author: "Suruthi D"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  word_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 6.5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", dpi = 150)
+library(tidyverse)
+library(knitr)
+library(gapminder)
+library(caret)
+library(pROC)
+theme_set(theme_minimal(base_size = 11))
+set.seed(123)
+
+# Load Pima data safely: try mlbench first, otherwise download the same dataset
+pima_raw <- NULL
+try({
+  e <- new.env()
+  data("PimaIndiansDiabetes", package = "mlbench", envir = e)
+  pima_raw <- e$PimaIndiansDiabetes
+}, silent = TRUE)
+
+if (is.null(pima_raw)) {
+  pima_raw <- read.csv(
+    "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pima-indians-diabetes.data.csv",
+    header = FALSE,
+    col.names = c("pregnant", "glucose", "pressure", "triceps",
+                  "insulin", "mass", "pedigree", "age", "diabetes"))
+  pima_raw$diabetes <- factor(ifelse(pima_raw$diabetes == 1, "pos", "neg"),
+                              levels = c("neg", "pos"))
+}
+```
+
+# 1. Introduction and Objectives
+
+This report consolidates three weeks of work into one document that follows data through its full life cycle in R: from a messy raw table, to clear visual communication, to a validated predictive model. The objectives are to:
+
+1. Show **how data is prepared**: missing values, outliers, scaling and encoding (Week 1, `msleep`).
+2. Show **how patterns are communicated**: choosing the right chart for each question (Week 2, `gapminder`).
+3. Show **how a model is built and judged**: hypothesis tests, cross-validation, diagnostics and metrics (Week 3, Pima Indians Diabetes).
+4. Connect the three stages, explain what the results mean for decision-makers, and record the reasoning behind every decision so the workflow is reproducible.
+
+The report is written for two audiences. Technical readers will find the annotated R code and diagnostics. Non-technical readers can follow the plain-language explanation that introduces each result and the "Hand-off" note that closes each part.
+
+## 1.1 The three projects at a glance
+
+```{r projects-overview, echo=FALSE}
+kable(tibble(
+  Stage = c("Week 1: Cleaning and EDA", "Week 2: Visualization", "Week 3: Modeling"),
+  Dataset = c("msleep (ggplot2)", "gapminder", "Pima Indians Diabetes"),
+  `Core question` = c("What must messy, mixed-type data go through before it can be trusted?",
+                      "How have health and wealth changed, and where are the anomalies?",
+                      "Can routine clinical measurements predict diabetes?"),
+  Techniques = c("Missing values, IQR outliers, log/z-score/min-max, one-hot/ordinal/frequency encoding, correlations",
+                 "Histogram, scatter, line and bar charts; log scales; population weighting",
+                 "Normality checks, t/Wilcoxon/chi-square tests, logistic regression, 10-fold CV, ROC")),
+  caption = "Overview of the three projects")
+```
+
+# 2. Methodology and Workflow
+
+All three projects followed the same six-phase workflow. Using one process made the projects comparable and each one easy to audit.
+
+| Phase | What happened |
+|---|---|
+| 1. Understand | Read documentation, inspect with `str()`, `summary()`, `glimpse()` |
+| 2. Prepare | Fix missing values, treat outliers, transform and encode variables |
+| 3. Explore | Descriptive statistics, correlations and charts |
+| 4. Model | Test hypotheses, fit a model, validate with cross-validation |
+| 5. Communicate | Interpret in plain language and state the business impact |
+| 6. Share | Version-control the code and outputs on GitHub |
+
+**Reproducibility.** Everything is written in R Markdown so that code, output and narrative live in one file. A fixed seed (`set.seed(123)`) is set wherever randomness is involved (data splitting and cross-validation), so a reviewer who reruns the file gets the same numbers. Repository links are in Appendix A.
+
+# 3. Part A: Data Preparation and Exploratory Analysis (Week 1)
+
+## 3.1 Dataset overview
+
+The **msleep** dataset ships with the `ggplot2` package. It is an updated version of the mammal sleep data of Allison and Cicchetti (1976) and holds sleep patterns, brain weight and body weight for 83 mammal species. It was chosen because it has missing values in both numeric and categorical columns, a mix of variable types, and strong outliers and skew (elephants versus mice), which makes normalisation and outlier handling meaningful rather than cosmetic.
+
+```{r ms-load}
+data("msleep", package = "ggplot2")
+ms_raw <- msleep          # untouched copy for before/after comparisons
+dim(ms_raw)
+```
+
+```{r ms-dictionary}
+ms_dictionary <- tibble(
+  Variable = c("name", "genus", "vore", "order", "conservation",
+               "sleep_total", "sleep_rem", "sleep_cycle", "awake",
+               "brainwt", "bodywt"),
+  Type = c(rep("Categorical", 5), rep("Numeric", 6)),
+  Description = c("Common name of the animal", "Genus", "Diet: carni, herbi, insecti, omni",
+                  "Taxonomic order", "Conservation status (IUCN-style code)",
+                  "Total sleep per day (hours)", "REM sleep per day (hours)",
+                  "Length of sleep cycle (hours)", "Hours awake per day",
+                  "Brain weight (kg)", "Body weight (kg)"))
+kable(ms_dictionary, caption = "Data dictionary: msleep")
+```
+
+```{r ms-structure}
+str(ms_raw)
+summary(ms_raw)
+```
+
+## 3.2 Missing values
+
+Missingness was uneven across variables, so one rule for every column would have been a mistake.
+
+```{r ms-missing-table}
+ms_miss <- tibble(
+  variable    = names(ms_raw),
+  n_missing   = colSums(is.na(ms_raw)),
+  pct_missing = round(100 * n_missing / nrow(ms_raw), 1)
+) %>% arrange(desc(n_missing))
+kable(ms_miss, caption = "Missing values per variable in the raw data")
+```
+
+```{r ms-missing-plot, fig.cap="Percentage of missing values per variable (raw data)"}
+ggplot(ms_miss, aes(x = reorder(variable, pct_missing), y = pct_missing)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = "% missing")
+```
+
+The strategy depends on the variable type and how much is missing:
+
+| Situation | Strategy | Reason |
+|---|---|---|
+| Column with more than 50% missing | Drop the column | Imputing most of a column mostly invents data |
+| Missing categorical value | Recode as an explicit `"unknown"` level | Missingness may itself be informative; avoids deleting rows |
+| Missing numeric value | Median of the animal's diet group (`vore`), falling back to the overall median | The median is robust to heavy skew; the group median keeps biological structure |
+| Imputed numeric values | Add a logical flag column | Keeps the imputation transparent for later modelling |
+
+## 3.3 Cleaning and imputation
+
+```{r ms-clean}
+ms <- ms_raw %>%
+  mutate(across(where(is.character), str_trim)) %>%
+  mutate(across(c(order, genus, vore, conservation), as.factor))
+
+# (a) Drop columns with too much missingness
+threshold <- 0.5
+high_miss <- names(which(colMeans(is.na(ms)) > threshold))
+cat("Columns dropped (>", threshold * 100, "% missing):", high_miss, "\n")
+ms <- ms %>% select(-all_of(high_miss))
+
+# (b) Categorical NA -> explicit "unknown" level
+ms <- ms %>%
+  mutate(across(c(vore, conservation),
+                ~ factor(replace_na(as.character(.x), "unknown"))))
+
+# (c) Numeric NA -> group median with overall-median fallback
+impute_group_median <- function(x, g) {
+  out <- ave(x, g, FUN = function(v) { v[is.na(v)] <- median(v, na.rm = TRUE); v })
+  out[is.na(out)] <- median(x, na.rm = TRUE)
+  out
+}
+
+ms <- ms %>%
+  mutate(brainwt_imputed   = is.na(brainwt),
+         sleep_rem_imputed = is.na(sleep_rem),
+         brainwt   = impute_group_median(brainwt,   vore),
+         sleep_rem = impute_group_median(sleep_rem, vore))
+
+cat("Total remaining NA:", sum(is.na(ms)), "\n")
+```
+
+**Sensitivity check:** imputation should not distort the distributions much.
+
+```{r ms-imputation-check}
+ms_check <- tibble(
+  variable    = c("sleep_rem", "brainwt"),
+  mean_before = c(mean(ms_raw$sleep_rem, na.rm = TRUE), mean(ms_raw$brainwt, na.rm = TRUE)),
+  mean_after  = c(mean(ms$sleep_rem), mean(ms$brainwt)),
+  sd_before   = c(sd(ms_raw$sleep_rem, na.rm = TRUE), sd(ms_raw$brainwt, na.rm = TRUE)),
+  sd_after    = c(sd(ms$sleep_rem), sd(ms$brainwt))
+) %>% mutate(across(where(is.numeric), ~ round(.x, 4)))
+kable(ms_check, caption = "Mean and SD before and after imputation")
+```
+
+## 3.4 Outlier detection
+
+Outliers are flagged with the **IQR rule**: a value is an outlier if it lies below Q1 - 1.5 x IQR or above Q3 + 1.5 x IQR.
+
+```{r outlier-function}
+iqr_outliers <- function(x) {
+  q   <- quantile(x, c(0.25, 0.75), na.rm = TRUE)
+  iqr <- q[2] - q[1]
+  x < q[1] - 1.5 * iqr | x > q[2] + 1.5 * iqr
+}
+
+ms_num_vars <- ms %>% select(where(is.numeric)) %>% names()
+
+ms_outliers <- map_dfr(ms_num_vars, function(v) {
+  flag <- iqr_outliers(ms[[v]])
+  tibble(variable = v, n_outliers = sum(flag), pct_outliers = round(100 * mean(flag), 1))
+})
+kable(ms_outliers, caption = "Outliers per numeric variable (IQR rule)")
+```
+
+```{r ms-outlier-boxplot, fig.cap="Boxplots of numeric variables (free scales) showing outliers", fig.height=5}
+ms %>%
+  select(all_of(ms_num_vars)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = variable, y = value)) +
+  geom_boxplot(fill = "lightblue", outlier.colour = "firebrick") +
+  facet_wrap(~ variable, scales = "free") +
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank())
+```
+
+```{r ms-outlier-animals}
+ms %>%
+  filter(iqr_outliers(bodywt)) %>%
+  select(name, bodywt, brainwt) %>%
+  arrange(desc(bodywt)) %>%
+  kable(caption = "Body-weight outliers")
+```
+
+**Decision:** these are genuine biological measurements (large mammals), not data-entry errors, so deleting them would remove real information. They are flagged, and their influence is reduced with a log transformation instead.
+
+## 3.5 Transformation, scaling and encoding
+
+```{r ms-transform}
+ms <- ms %>%
+  mutate(bodywt_outlier  = iqr_outliers(bodywt),
+         brainwt_outlier = iqr_outliers(brainwt),
+         log_bodywt  = log10(bodywt),
+         log_brainwt = log10(brainwt))
+
+minmax <- function(x) (x - min(x)) / (max(x) - min(x))
+scale_vars <- c("sleep_total", "sleep_rem", "awake", "log_brainwt", "log_bodywt")
+
+ms_norm <- ms %>%
+  mutate(across(all_of(scale_vars),
+                list(z = ~ as.numeric(scale(.x)), mm = minmax)))
+```
+
+```{r ms-log-plot, fig.cap="Body weight before and after log10 transformation"}
+bind_rows(tibble(scale = "Original (kg)", value = ms$bodywt),
+          tibble(scale = "log10(kg)",     value = ms$log_bodywt)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 20, fill = "steelblue", colour = "white") +
+  facet_wrap(~ scale, scales = "free") +
+  labs(x = NULL, y = "Count")
+```
+
+Three different encodings are used, each matched to the variable:
+
+| Variable | Encoding | Reason |
+|---|---|---|
+| `vore` (5 levels, no order) | One-hot (dummy) | No natural order between diets |
+| `conservation` | Ordinal | Threat categories have a natural order of risk |
+| `order` (many levels) | Frequency encoding | One-hot would add too many columns for 83 rows |
+
+```{r ms-encoding}
+onehot <- model.matrix(~ vore - 1, data = ms_norm)
+colnames(onehot) <- paste0("vore_", levels(ms_norm$vore))
+
+# "domesticated" and "unknown" are not points on the threat scale -> NA
+threat_order <- c("lc", "cd", "nt", "vu", "en")
+
+ms_enc <- bind_cols(ms_norm, as_tibble(onehot)) %>%
+  mutate(conservation_ord = match(as.character(conservation), threat_order),
+         order_freq = ave(rep(1, n()), order, FUN = sum) / n())
+
+ms_enc %>%
+  select(name, vore, starts_with("vore_"), conservation, conservation_ord, order, order_freq) %>%
+  head(6) %>%
+  kable(digits = 3, caption = "First rows of the encoded variables")
+```
+
+```{r ms-save}
+write_csv(ms_enc, "msleep_clean.csv")
+```
+
+## 3.6 Exploratory analysis of the cleaned data
+
+```{r ms-descriptive}
+ms_desc <- ms %>%
+  select(all_of(ms_num_vars)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  group_by(variable) %>%
+  summarise(n = n(), mean = mean(value), median = median(value), sd = sd(value),
+            min = min(value), max = max(value),
+            skewness = mean((value - mean(value))^3) / sd(value)^3,
+            .groups = "drop") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+kable(ms_desc, caption = "Descriptive statistics of numeric variables")
+```
+
+```{r ms-by-vore}
+ms_by_vore <- ms %>%
+  group_by(vore) %>%
+  summarise(n = n(),
+            mean_sleep   = round(mean(sleep_total), 2),
+            median_sleep = round(median(sleep_total), 2),
+            mean_rem     = round(mean(sleep_rem), 2),
+            .groups = "drop") %>%
+  arrange(desc(mean_sleep))
+kable(ms_by_vore, caption = "Sleep by diet group")
+```
+
+```{r ms-scatter, fig.cap="Total sleep versus log10 body weight, coloured by diet"}
+ggplot(ms, aes(log_bodywt, sleep_total)) +
+  geom_point(aes(colour = vore), size = 2.5, alpha = 0.8) +
+  geom_smooth(method = "lm", formula = y ~ x, colour = "black") +
+  labs(x = "log10 body weight (kg)", y = "Total sleep (hours)", colour = "Diet")
+```
+
+```{r ms-heatmap, fig.cap="Correlation heatmap of the msleep numeric variables"}
+cor_vars <- c("sleep_total", "sleep_rem", "awake", "log_brainwt", "log_bodywt")
+ms_cmat <- cor(ms[cor_vars])
+
+as.data.frame(as.table(ms_cmat)) %>%
+  ggplot(aes(Var1, Var2, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Freq, 2))) +
+  scale_fill_gradient2(low = "firebrick", mid = "white", high = "steelblue", limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL, fill = "r") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+```{r ms-insight-values, include=FALSE}
+r_sleep_body <- cor(ms$sleep_total, ms$log_bodywt)
+r_brain_body <- cor(ms$log_brainwt, ms$log_bodywt)
+top_diet     <- as.character(ms_by_vore$vore[1])
+```
+
+**Findings from Part A.**
+
+* The raw data had `r sum(is.na(ms_raw))` missing cells; `r sum(is.na(ms))` remain after cleaning.
+* Total sleep and log body weight have r = `r round(r_sleep_body, 2)`: `r ifelse(r_sleep_body < 0, "larger", "smaller")` animals tend to sleep `r ifelse(r_sleep_body < 0, "less", "more")`.
+* log brain weight and log body weight are very highly correlated (r = `r round(r_brain_body, 2)`), reflecting allometric scaling.
+* `awake` equals 24 minus `sleep_total` (r = `r round(cor(ms$sleep_total, ms$awake), 2)`), so only one of the two should enter a model.
+* The diet group with the highest average sleep is **`r top_diet`**, but group sizes are uneven, so this is preliminary.
+
+**Hand-off to Part B:** a documented, fully populated dataset, and the habit of asking *why* a value is missing or extreme before deciding what to do with it.
+
+# 4. Part B: Data Visualization and Insight Communication (Week 2)
+
+## 4.1 Dataset overview
+
+The **gapminder** dataset tracks `r n_distinct(gapminder$country)` countries every five years from `r min(gapminder$year)` to `r max(gapminder$year)`, giving `r nrow(gapminder)` rows. Unlike msleep, it is already clean, so the effort moves from repairing data to choosing the right chart for each question.
+
+```{r gap-dictionary}
+kable(tibble(
+  Variable = c("country", "continent", "year", "lifeExp", "pop", "gdpPercap"),
+  Type = c("Categorical", "Categorical", "Numeric", "Numeric", "Numeric", "Numeric"),
+  Description = c("Country name", "Continent", "Year (every 5 years)",
+                  "Life expectancy at birth (years)", "Population",
+                  "GDP per capita (inflation-adjusted US$)")),
+  caption = "Data dictionary: gapminder")
+```
+
+```{r gap-check}
+cat("Missing values:", sum(is.na(gapminder)), "\n")
+summary(gapminder)
+```
+
+```{r gap-by-continent}
+gap07 <- gapminder %>% filter(year == 2007)
+
+gap07 %>%
+  group_by(continent) %>%
+  summarise(countries = n(),
+            mean_life  = round(mean(lifeExp), 1),
+            median_gdp = round(median(gdpPercap)),
+            pop_millions = round(sum(as.numeric(pop)) / 1e6),
+            .groups = "drop") %>%
+  kable(caption = "2007 snapshot by continent")
+```
+
+## 4.2 Choosing the right chart for each question
+
+| Chart | Question it answers | Why it fits |
+|---|---|---|
+| Histogram | How is life expectancy distributed worldwide in 2007? | Shows shape, spread and any split into groups |
+| Scatter (log x) | Does wealth relate to life expectancy? | Two continuous variables; the log scale handles the wide income range |
+| Line | How has life expectancy changed over time by continent? | Time is the natural x-axis; lines show trend and gaps |
+| Bar | Which continents have the highest GDP per capita? | Compares one summary value across categories |
+
+## 4.3 Visualizations and interpretation
+
+```{r gap-hist, fig.cap="Distribution of life expectancy across countries, 2007"}
+ggplot(gap07, aes(lifeExp)) +
+  geom_histogram(bins = 20, fill = "steelblue", colour = "white") +
+  geom_vline(aes(xintercept = mean(lifeExp)), colour = "firebrick", linetype = "dashed") +
+  labs(x = "Life expectancy (years)", y = "Number of countries")
+```
+
+```{r gap-scatter, fig.cap="Life expectancy versus GDP per capita (log scale), 2007"}
+ggplot(gap07, aes(gdpPercap, lifeExp, colour = continent, size = pop)) +
+  geom_point(alpha = 0.7) +
+  scale_x_log10(labels = scales::dollar) +
+  scale_size(range = c(1, 12), guide = "none") +
+  labs(x = "GDP per capita (log scale)", y = "Life expectancy (years)", colour = "Continent")
+```
+
+```{r gap-line, fig.cap="Population-weighted life expectancy by continent, 1952 to 2007"}
+life_cont <- gapminder %>%
+  group_by(continent, year) %>%
+  summarise(life = weighted.mean(lifeExp, pop), .groups = "drop")
+
+ggplot(life_cont, aes(year, life, colour = continent)) +
+  geom_line(linewidth = 1.1) + geom_point() +
+  labs(x = NULL, y = "Life expectancy (years)", colour = "Continent")
+```
+
+```{r gap-bar, fig.cap="Mean GDP per capita by continent, 2007"}
+gap07 %>%
+  group_by(continent) %>%
+  summarise(gdp = mean(gdpPercap), .groups = "drop") %>%
+  ggplot(aes(reorder(continent, gdp), gdp)) +
+  geom_col(fill = "#1F3864") +
+  coord_flip() +
+  labs(x = NULL, y = "Mean GDP per capita (US$)")
+```
+
+## 4.4 Quantifying what the charts show
+
+```{r gap-gains}
+gains <- gapminder %>%
+  filter(year %in% c(1952, 2007)) %>%
+  group_by(continent, year) %>%
+  summarise(life = weighted.mean(lifeExp, pop), .groups = "drop") %>%
+  pivot_wider(names_from = year, values_from = life, names_prefix = "y") %>%
+  mutate(gain = y2007 - y1952) %>%
+  arrange(desc(gain)) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 1)))
+kable(gains, caption = "Life expectancy gain by continent, 1952 to 2007")
+```
+
+```{r gap-drops}
+changes <- gapminder %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(change = lifeExp - lag(lifeExp)) %>%
+  ungroup() %>%
+  filter(!is.na(change))
+
+worst <- changes %>% arrange(change) %>% slice(1)
+```
+
+```{r gap-insight-values, include=FALSE}
+r_gdp_life <- cor(log10(gap07$gdpPercap), gap07$lifeExp)
+fit_gap    <- lm(lifeExp ~ log10(gdpPercap), data = gap07)
+r2_gap     <- summary(fit_gap)$r.squared
+n_declines <- sum(changes$change < 0)
+```
+
+**Findings from Part B.**
+
+* **Wealth and health.** log10 GDP per capita and life expectancy have r = `r round(r_gdp_life, 2)` in 2007, and income explains about `r round(100 * r2_gap)`% of the variation in life expectancy across countries. The curve flattens at high incomes: early gains in income are associated with the biggest health gains.
+* **Progress over time.** Every continent improved. The largest gain was in **`r as.character(gains$continent[1])`** (`r gains$gain[1]` years) and the smallest in **`r as.character(gains$continent[nrow(gains)])`** (`r gains$gain[nrow(gains)]` years).
+* **Anomalies.** Despite the global trend, `r n_declines` country-periods show a decline. The largest single drop was **`r as.character(worst$country)`**, which lost `r round(abs(worst$change), 1)` years between `r worst$year - 5` and `r worst$year`. Averages hide events like this, which is why grouped and country-level views matter.
+* **Income does not tell the whole story.** Countries with similar GDP per capita can differ by 10 or more years of life expectancy, which points to factors such as health policy and disease burden.
+
+**Hand-off to Part C:** visual evidence that relationships can be non-linear, that averages conceal regional differences, and that distributions should be checked before any model assumes they are well behaved.
+
+# 5. Part C: Statistical Analysis and Predictive Modeling (Week 3)
+
+## 5.1 Dataset and rationale
+
+The **Pima Indians Diabetes** dataset has `r nrow(pima_raw)` female patients and eight clinical predictors. It suits predictive modeling because the outcome is binary, the predictors are clinically meaningful, and the sample is large enough for cross-validation yet small enough to interpret.
+
+```{r pima-load}
+pima <- pima_raw
+pima$diabetes <- factor(pima$diabetes, levels = c("pos", "neg"))   # "pos" first = event of interest
+
+kable(tibble(
+  Variable = names(pima),
+  Description = c("Number of pregnancies", "Plasma glucose concentration",
+                  "Diastolic blood pressure (mm Hg)", "Triceps skin-fold thickness (mm)",
+                  "2-hour serum insulin (mu U/ml)", "Body mass index",
+                  "Diabetes pedigree function", "Age (years)",
+                  "Outcome: pos = diabetes, neg = no diabetes")),
+  caption = "Data dictionary: Pima Indians Diabetes")
+
+pima_balance <- tibble(class = names(table(pima$diabetes)),
+                       n = as.integer(table(pima$diabetes)),
+                       pct = round(100 * prop.table(table(pima$diabetes)), 1))
+kable(pima_balance, caption = "Class balance of the outcome")
+```
+
+## 5.2 Hidden missing values
+
+A zero is physiologically impossible for glucose, blood pressure, skin-fold thickness, insulin and BMI. These zeros are **disguised missing values**, and the Week 1 lesson applies directly: ask what a value means before using it.
+
+```{r pima-zeros}
+cols <- c("glucose", "pressure", "triceps", "insulin", "mass")
+
+zero_tbl <- tibble(variable = cols,
+                   n_zero = sapply(pima[cols], function(x) sum(x == 0)),
+                   pct_zero = round(100 * n_zero / nrow(pima), 1)) %>%
+  arrange(desc(n_zero))
+kable(zero_tbl, caption = "Impossible zero values per variable")
+```
+
+| Situation | Strategy | Reason |
+|---|---|---|
+| Impossible zero in a clinical measurement | Recode as `NA` | The value is missing, not zero |
+| Remaining `NA` | Replace with the variable median | Robust to the skew seen in insulin and triceps |
+
+```{r pima-clean}
+pima[cols] <- lapply(pima[cols], function(x) { x[x == 0] <- NA; x })
+pima[cols] <- lapply(pima[cols], function(x) { x[is.na(x)] <- median(x, na.rm = TRUE); x })
+cat("Total remaining NA:", sum(is.na(pima)), "\n")
+```
+
+## 5.3 Exploratory statistics and hypothesis tests
+
+```{r pima-boxplot, fig.cap="Predictors by diabetes status", fig.height=5.5}
+pima %>%
+  pivot_longer(-diabetes, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(diabetes, value, fill = diabetes)) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(~ variable, scales = "free_y") +
+  labs(x = NULL, y = NULL)
+```
+
+Shapiro-Wilk tests check whether each predictor is normal, and non-parametric Wilcoxon tests are used so the conclusions do not depend on that assumption. Cohen's d reports the *size* of the difference, not just whether it is detectable.
+
+```{r pima-tests}
+cohens_d <- function(x, g) {
+  x1 <- x[g == "pos"]; x0 <- x[g == "neg"]
+  sp <- sqrt(((length(x1) - 1) * var(x1) + (length(x0) - 1) * var(x0)) /
+               (length(x1) + length(x0) - 2))
+  (mean(x1) - mean(x0)) / sp
+}
+
+predictors <- setdiff(names(pima), "diabetes")
+
+pima_tests <- map_dfr(predictors, function(v) {
+  tibble(variable  = v,
+         mean_pos  = round(mean(pima[[v]][pima$diabetes == "pos"]), 2),
+         mean_neg  = round(mean(pima[[v]][pima$diabetes == "neg"]), 2),
+         shapiro_p = format.pval(shapiro.test(pima[[v]])$p.value, digits = 3, eps = 1e-4),
+         wilcox_p  = format.pval(wilcox.test(pima[[v]] ~ pima$diabetes)$p.value, digits = 3, eps = 1e-4),
+         cohens_d  = round(cohens_d(pima[[v]], pima$diabetes), 2))
+}) %>% arrange(desc(abs(cohens_d)))
+
+kable(pima_tests, caption = "Group comparison by diabetes status (sorted by effect size)")
+```
+
+```{r pima-extra-tests}
+t.test(glucose ~ diabetes, data = pima)
+
+age_group <- cut(pima$age, c(20, 30, 40, 50, 100), include.lowest = TRUE)
+chisq.test(table(age_group, pima$diabetes))
+```
+
+A p-value below 0.05 means the observed difference would be unlikely if the two groups were really the same. A tiny p-value alone does not make an effect important, which is why the effect size column matters.
+
+```{r pima-corr, fig.cap="Correlation among predictors"}
+pima_cmat <- cor(pima[predictors])
+
+as.data.frame(as.table(pima_cmat)) %>%
+  ggplot(aes(Var1, Var2, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Freq, 2)), size = 3) +
+  scale_fill_gradient2(low = "firebrick", mid = "white", high = "steelblue", limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL, fill = "r") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## 5.4 Modeling approach
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Validation | 80/20 train-test split, plus 10-fold cross-validation on the training set | The test set stays untouched until the final check; CV gives a stable estimate while tuning |
+| Baseline model | Logistic regression | Interpretable: coefficients become odds ratios |
+| Comparison model | Decision tree (`rpart`) | Can capture non-linear relationships that logistic regression cannot |
+| Selection metric | ROC AUC | Not distorted by the 65/35 class imbalance |
+| Scaling | Centre and scale inside the CV loop | Odds ratios become "per 1 SD increase", comparable across predictors |
+
+```{r pima-split}
+set.seed(123)
+idx   <- createDataPartition(pima$diabetes, p = 0.8, list = FALSE)
+train <- pima[idx, ]
+test  <- pima[-idx, ]
+cat("Training rows:", nrow(train), "| Test rows:", nrow(test), "\n")
+```
+
+```{r pima-fit}
+ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE,
+                     summaryFunction = twoClassSummary, savePredictions = "final")
+
+set.seed(123)
+fit_glm <- train(diabetes ~ ., data = train, method = "glm", family = "binomial",
+                 metric = "ROC", trControl = ctrl, preProcess = c("center", "scale"))
+
+set.seed(123)
+fit_tree <- train(diabetes ~ ., data = train, method = "rpart",
+                  metric = "ROC", trControl = ctrl, tuneLength = 5)
+
+cv_tbl <- bind_rows(
+  fit_glm$results  %>% transmute(Model = "Logistic regression", ROC, Sens, Spec),
+  fit_tree$results %>% slice_max(ROC, n = 1, with_ties = FALSE) %>%
+    transmute(Model = "Decision tree (rpart)", ROC, Sens, Spec)
+) %>% mutate(across(where(is.numeric), ~ round(.x, 3)))
+kable(cv_tbl, caption = "10-fold cross-validation results (training data)")
+```
+
+## 5.5 Interpreting the logistic regression
+
+```{r pima-odds}
+m <- fit_glm$finalModel
+
+# caret's glm models the SECOND factor level ("neg"), so the signs are
+# inverted to express the odds of diabetes ("pos")
+or_tbl <- tibble(
+  predictor  = names(coef(m))[-1],
+  odds_ratio = exp(-coef(m))[-1],
+  ci_low     = exp(-confint.default(m))[-1, 2],
+  ci_high    = exp(-confint.default(m))[-1, 1],
+  p_value    = summary(m)$coefficients[-1, 4]
+) %>%
+  arrange(desc(odds_ratio)) %>%
+  mutate(across(c(odds_ratio, ci_low, ci_high), ~ round(.x, 2)),
+         p_value = format.pval(p_value, digits = 3, eps = 1e-4))
+kable(or_tbl, caption = "Odds of diabetes per 1 SD increase in each predictor (95% Wald CI)")
+```
+
+```{r pima-or-plot, fig.cap="Odds ratios with 95% confidence intervals"}
+ggplot(or_tbl, aes(odds_ratio, reorder(predictor, odds_ratio))) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey40") +
+  geom_pointrange(aes(xmin = ci_low, xmax = ci_high), colour = "steelblue") +
+  labs(x = "Odds ratio (per 1 SD)", y = NULL)
+```
+
+An odds ratio above 1 means that a higher value of the predictor raises the odds of diabetes. A confidence interval that excludes 1 indicates a reliable effect.
+
+## 5.6 Final evaluation on the held-out test set
+
+```{r pima-test-eval}
+prob <- predict(fit_glm, newdata = test, type = "prob")$pos
+pred <- factor(ifelse(prob >= 0.5, "pos", "neg"), levels = c("pos", "neg"))
+
+cm      <- confusionMatrix(pred, test$diabetes, positive = "pos")
+roc_obj <- roc(test$diabetes, prob, levels = c("neg", "pos"), direction = "<")
+auc_val <- as.numeric(auc(roc_obj))
+
+kable(as.data.frame.matrix(cm$table), caption = "Confusion matrix (rows = predicted, columns = actual)")
+
+kable(tibble(
+  Metric = c("Accuracy", "Sensitivity", "Specificity", "Precision", "AUC"),
+  Result = round(c(cm$overall["Accuracy"], cm$byClass["Sensitivity"], cm$byClass["Specificity"],
+                   cm$byClass["Pos Pred Value"], auc_val), 3),
+  Meaning = c("Share of all patients classified correctly",
+              "Share of true diabetics the model catches",
+              "Share of healthy patients correctly cleared",
+              "Share of predicted diabetics who truly have diabetes",
+              "Ability to rank a diabetic above a healthy patient (0.5 = chance, 1 = perfect)")),
+  caption = "Test-set performance of the logistic regression")
+```
+
+```{r pima-roc, fig.cap="ROC curve on the test set"}
+plot(roc_obj, main = "ROC curve: logistic regression (test set)")
+```
+
+**Threshold tuning.** The default cut-off of 0.5 treats both kinds of error equally. In screening, missing a true case is usually costlier than a false alarm, so a lower threshold may be preferable.
+
+```{r pima-threshold}
+thr_tbl <- map_dfr(c(0.3, 0.4, 0.5), function(t) {
+  p  <- factor(ifelse(prob >= t, "pos", "neg"), levels = c("pos", "neg"))
+  cc <- confusionMatrix(p, test$diabetes, positive = "pos")
+  tibble(threshold   = t,
+         accuracy    = round(as.numeric(cc$overall["Accuracy"]), 3),
+         sensitivity = round(as.numeric(cc$byClass["Sensitivity"]), 3),
+         specificity = round(as.numeric(cc$byClass["Specificity"]), 3))
+})
+kable(thr_tbl, caption = "Effect of the classification threshold")
+```
+
+```{r pima-insight-values, include=FALSE}
+top_effect  <- pima_tests$variable[1]
+top_or      <- or_tbl$predictor[1]
+n_pos       <- sum(pima$diabetes == "pos")
+pct_pos     <- round(100 * mean(pima$diabetes == "pos"), 1)
+better_cv   <- cv_tbl$Model[which.max(cv_tbl$ROC)]
+```
+
+**Findings from Part C.**
+
+* **Class balance.** `r n_pos` of `r nrow(pima)` patients (`r pct_pos`%) have diabetes, so accuracy alone would flatter a model that favours the majority class.
+* **Strongest group difference.** **`r top_effect`** shows the largest effect size between diabetic and non-diabetic patients (Cohen's d = `r pima_tests$cohens_d[1]`).
+* **Strongest model predictor.** **`r top_or`** has the highest odds ratio per 1 SD increase (`r or_tbl$odds_ratio[1]`).
+* **Model comparison.** In cross-validation, **`r better_cv`** achieved the higher AUC, so the simpler interpretable model is not necessarily the weaker one.
+* **Test-set result.** The logistic regression reached an AUC of `r round(auc_val, 3)`, sensitivity of `r round(cm$byClass["Sensitivity"], 3)` and specificity of `r round(cm$byClass["Specificity"], 3)` on data it had never seen.
+
+## 5.7 Strengths and limitations of the model
+
+* **Strengths:** transparent, fast, and its coefficients agree with clinical expectation (glucose and BMI as main risk signals).
+* **Limitations:** it assumes a linear relationship between predictors and the log-odds; median imputation was applied before splitting the data, which lets a small amount of information leak from the test set; and the data comes from one specific population, so the model should not be applied elsewhere without external validation.
+
+# 6. Integrated Results
+
+The three projects are not independent exercises. Each one depended on the one before it.
+
+| Theme | Where it appeared | What it showed |
+|---|---|---|
+| Data quality drives results | Week 1 missing values; Week 3 hidden zeros | The same discipline was needed twice: ask what a value means before trusting it. Unchecked zeros would have distorted every later statistic. |
+| Scale and skew matter | Week 1 log of body weight; Week 2 log of GDP; Week 3 normality checks | Skewed variables hide patterns and break assumptions; transformation revealed structure in all three datasets. |
+| Visuals come before models | Week 2 curved income-health relationship | Looking first revealed non-linearity and motivated checking assumptions and comparing a tree against logistic regression. |
+| Averages hide detail | Week 2 continent trends and country declines; Week 3 class balance | Grouped views and per-class metrics expose what a single summary number conceals. |
+| Effect size beats p-value | Week 1 correlations; Week 3 Cohen's d and odds ratios | Significance says an effect is detectable; effect size says whether it matters. |
+
+# 7. Discussion and Business Implications
+
+* **Health screening.** A simple model built on routine measurements can help prioritise patients for follow-up testing. Its value is triage, helping limited clinical resources reach high-risk people first, not replacing diagnosis. The threshold table shows that the cut-off should be chosen from the cost of a missed case, not left at the default.
+* **Policy and investment.** The wealth-health curve suggests that spending has the largest effect where baseline health is lowest, and the country-level declines show that income alone does not protect health outcomes, so targeted health programmes matter.
+* **Data governance.** Preparation choices (what to impute, what to drop, what to keep as an outlier) silently shape every conclusion. Documenting them, as done in Part A, makes analyses reviewable and trustworthy.
+* **Communication.** The same finding needs different framing for different readers: an odds ratio for a clinician, a trend line for a policy maker, a one-sentence takeaway for a manager.
+
+# 8. Challenges Overcome and Lessons Learned
+
+| Challenge | How it was handled |
+|---|---|
+| Deciding how to treat missing data | Treated each variable separately: dropped a column that was mostly empty, group-median imputation for numerics, `"unknown"` for factors |
+| Skewed and extreme values | Kept genuine extremes, flagged them, and used log transformations instead of deletion |
+| Zeros hiding as real values in Pima | Used domain knowledge to recognise impossible values and recode them as missing |
+| Choosing between models | Compared logistic regression with a decision tree under identical cross-validation folds |
+| Explaining results to non-technical readers | Led each part with the question and closed it with a plain-language takeaway |
+| Environment and reproducibility | Worked in Posit Cloud, fixed seeds, versioned everything on GitHub |
+
+**Lessons learned**
+
+* Cleaning is analysis, not a chore: the most consequential decisions happen before any model is fitted.
+* A chart is an argument. Axis, scale and title shape what the reader concludes.
+* Accuracy is rarely the right headline metric. The cost of each kind of error should guide the choice.
+* Keep the test set untouched until the end, and report effect sizes, not just p-values.
+* Documenting the reasoning next to the code makes work reusable.
+
+# 9. Recommendations and Future Directions
+
+* **Richer models:** compare logistic regression with random forests and gradient boosting, and examine feature importance.
+* **Better imputation:** use multiple imputation (e.g. `mice`) and, for the model, impute inside the cross-validation loop to remove leakage.
+* **Threshold tuning:** choose the cut-off that matches the real cost of a missed diagnosis.
+* **Interactive communication:** build a Shiny dashboard so stakeholders can explore the gapminder trends and model predictions.
+* **External validation:** test the diabetes model on a different population before any real-world use.
+* **Automation:** wrap the cleaning steps into reusable functions or a pipeline so new data is processed consistently.
+
+# 10. Conclusion and Limitations
+
+The report followed data through its full journey. In Week 1 messy data was cleaned and made trustworthy; in Week 2 it was made understandable through purposeful visualisation; in Week 3 it was turned into a validated predictive model. The recurring lesson is that a data-driven approach is only as strong as its weakest stage: careful preparation protects the model's validity, clear visuals make findings usable, and honest evaluation prevents overconfidence. A data-driven approach does not remove judgment; it makes judgment visible and testable.
+
+**Limitations:**
+
+* The three datasets are public, small and unrelated, so the report demonstrates method rather than a single unified business case.
+* Median imputation shrinks variance slightly and, for Pima, was applied before the train-test split.
+* Correlation and prediction do not establish causation, and species and countries are not fully independent observations.
+
+# Appendix A: Project Repositories
+
+* Week 1, data cleaning: https://github.com/suruthi-1/r-data-cleaning-analysis
+* Week 2, visualization: https://github.com/suruthi-1/r-data-visualization
+* Week 3, predictive modeling: add your repository link here
+* Final report: add your repository link here
+
+# Appendix B: Reproducibility
+
+```{r session}
+sessionInfo()
+```
