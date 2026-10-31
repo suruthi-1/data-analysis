@@ -10,7 +10,13 @@ Files:
 - Data_Analysis_Report.docx: final report
 - msleep_clean.csv: cleaned Week 1 dataset
 - Data_Analysis_Report.pdf: final report for viewing without download
-  
+
+## Screenshot
+
+![RStudio workspace](workflow.png)
+Fig: Project running in RStudio on Posit Cloud, showing the Rmd file, data objects and knitted
+output
+
 Previous projects:
 - Week 1: https://github.com/suruthi-1/r-data-cleaning-analysis
 - Week 2: https://github.com/suruthi-1/r-data-visualization
