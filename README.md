@@ -6,7 +6,7 @@ Final report combining three projects in R:
 - Week 3: statistical analysis and predictive modeling (Pima Indians Diabetes)
 
 Files:
-- Data_Analysis.Rmd: R Markdown source (knit to Word)
+- Data_Analysis.Rmd: R Markdown source 
 - Data_Analysis_Report.docx: final report
 - msleep_clean.csv: cleaned Week 1 dataset
 
