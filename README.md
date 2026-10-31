@@ -9,7 +9,8 @@ Files:
 - Data_Analysis.Rmd: R Markdown source 
 - Data_Analysis_Report.docx: final report
 - msleep_clean.csv: cleaned Week 1 dataset
-
+- Data_Analysis_Report.pdf: final report for viewing without download
+  
 Previous projects:
 - Week 1: https://github.com/suruthi-1/r-data-cleaning-analysis
 - Week 2: https://github.com/suruthi-1/r-data-visualization
